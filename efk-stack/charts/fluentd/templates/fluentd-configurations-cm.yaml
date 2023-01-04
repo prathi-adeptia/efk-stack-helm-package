@@ -1,0 +1,251 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-config
+  labels:
+    {{- include "fluentd.labels" . | nindent 4 }}
+data:
+{{- range $key, $value := .Values.fileConfigs }}
+  {{$key }}: |-
+    {{- $value | nindent 4 }}
+{{- end }}
+
+---
+
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: fluentd-main
+  labels:
+    {{- include "fluentd.labels" . | nindent 4 }}
+data:
+  fluent.conf: |-
+    # do not collect fluentd logs to avoid infinite loops.
+    <label @FLUENT_LOG>
+      <match **>
+        @type null
+        @id ignore_fluent_logs
+      </match>
+    </label>
+
+    @include source.conf
+    @include elastic-output.conf
+    @include config.d/*.conf
+    {{- range $key := .Values.configMapConfigs }}
+    {{- print "@include " $key ".d/*"  | nindent 4 }}
+    {{- end }}
+    
+    
+  source.conf: |-
+    # HTTP input for the liveness and readiness probes
+    <source>
+      @type http
+      port 9880
+    </source>
+
+    @include gateway-input.conf
+    @include webrunner-input.conf
+    @include portal-input.conf
+    @include event-input.conf
+    @include runtime-input.conf
+
+  gateway-input.conf: |-
+    <source>
+      @type tail
+      tag service.gateway.*
+      path /var/log/containers/*gateway*.log
+      pos_file /var/log/gateway-containers.log.pos
+      read_from_head true
+      @include source-parser.conf
+    </source>
+    <match service.gateway.**>
+      @id service.gateway
+      @include exception-detector.conf
+    </match>
+    @include concat-filter.conf
+    <filter gateway.**>
+      @id gateway_kubernetes_metadata-filter
+      @include kubernetes_metadata-filter.conf
+    </filter>
+    <filter gateway.**>
+      @id gateway_log-field-parser
+      @include log-field-parser.conf
+    </filter>
+
+  portal-input.conf: |-
+    <source>
+      @type tail
+      tag service.portal.*
+      path /var/log/containers/*portal*.log
+      pos_file /var/log/portal-containers.log.pos
+      read_from_head true
+      @include source-parser.conf
+    </source>
+    <match service.portal.**>
+      @id service.portal
+      @include exception-detector.conf
+    </match>
+    @include concat-filter.conf
+    <filter portal.**>
+      @id portal_kubernetes_metadata-filter
+      @include kubernetes_metadata-filter.conf
+    </filter>
+    <filter portal.**>
+      @id portal_log-field-parser
+      @include log-field-parser.conf
+    </filter>
+
+  webrunner-input.conf: |-
+    <source>
+      @type tail
+      tag service.webrunner.*
+      path /var/log/containers/*web-runner*.log
+      pos_file /var/log/webrunner-containers.log.pos
+      read_from_head true
+      @include source-parser.conf
+    </source>
+    <match service.webrunner.**>
+      @id service.webrunner
+      @include exception-detector.conf
+    </match>
+    @include concat-filter.conf
+    <filter webrunner.**>
+      @id webrunner_kubernetes_metadata-filter
+      @include kubernetes_metadata-filter.conf
+    </filter>
+    <filter webrunner.**>
+      @id webrunner_log-field-parser
+      @include log-field-parser.conf
+    </filter>
+
+  event-input.conf: |-
+    <source>
+      @type tail
+      tag service.event.*
+      path /var/log/containers/*event*.log
+      pos_file /var/log/event-containers.log.pos
+      read_from_head true
+      @include source-parser.conf
+    </source>
+    <match service.event.**>
+      @id service.event
+      @include exception-detector.conf
+    </match>
+    @include concat-filter.conf
+    <filter event.**>
+      @id event_kubernetes_metadata-filter
+      @include kubernetes_metadata-filter.conf
+    </filter>
+    <filter event.**>
+      @id event_log-field-parser
+      @include log-field-parser.conf
+    </filter>
+
+  runtime-input.conf: |-
+    <source>
+      @type tail
+      tag service.runtime.*
+      path /var/log/containers/*runtime*.log
+      pos_file /var/log/runtime-containers.log.pos
+      read_from_head true
+      @include source-parser.conf
+    </source>
+    <match service.runtime.**>
+      @id service.runtime
+      @include exception-detector.conf
+    </match>
+    @include concat-filter.conf
+    <filter runtime.**>
+      @id runtime_kubernetes_metadata-filter
+      @include kubernetes_metadata-filter.conf
+    </filter>
+    <filter runtime.**>
+      @id runtime_log-field-parser
+      @include log-field-parser.conf
+    </filter>
+
+  exception-detector.conf: |-
+    # Detect exceptions in the log output and forward them as one log entry.
+    @type detect_exceptions
+    remove_tag_prefix service
+    message log
+    stream stream
+    multiline_flush_interval 5
+    max_bytes 500000
+    max_lines 1000
+
+  concat-filter.conf: |-
+    <filter **>
+      # @id filter_concat
+      @type concat
+      key log
+      use_first_timestamp true
+      multiline_end_regexp /}$/
+      separator ""
+      flush_interval 10
+    </filter>
+
+  kubernetes_metadata-filter.conf: |-
+    # Enriches records with Kubernetes metadata
+    @type kubernetes_metadata
+      # skip_namespace_metadata true
+      # skip_master_url true
+      # skip_labels false
+      # skip_container_metadata false
+
+  log-field-parser.conf: |-
+    @type parser
+    key_name log
+    reserve_time true
+    reserve_data true
+    remove_key_name_field true
+    <parse>
+      @type multi_format
+      <pattern>
+        format json
+      </pattern>
+      <pattern>
+        format none
+      </pattern>
+    </parse>
+
+  source-parser.conf: |-
+    <parse>
+      @type multi_format
+      <pattern>
+        format json
+        time_key time
+        #time_format %Y-%m-%dT%H:%M:%S.%NZ
+      </pattern>
+      <pattern>
+        format /^(?<time>.+) (?<stream>stdout|stderr) [^ ]* (?<log>.*)$/
+        time_format %Y-%m-%dT%H:%M:%S.%N%:z
+      </pattern>
+    </parse>
+  elastic-output.conf: |-
+    <match gateway.**>
+       @include elastic-search.conf
+       index_name Gateway
+    </match>
+    <match portal.**>
+       @include elastic-search.conf
+       index_name Portal
+    </match>
+    <match webrunner.**>
+       @include elastic-search.conf
+       index_name WebRunner
+    </match>
+    <match event.**>
+       @include elastic-search.conf
+       index_name Event
+    </match>
+    <match runtime.**>
+       @include elastic-search.conf
+       index_name Runtime
+    </match>
+
+  elastic-search.conf: |-
+    @type elasticsearch
+    host "#{ENV['FLUENT_ELASTICSEARCH_HOST'] || 'elasticsearch-master'}"
+    port "#{ENV['FLUENT_ELASTICSEARCH_PORT'] || '9200'}"
+    include_tag_key true
