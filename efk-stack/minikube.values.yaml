@@ -1,0 +1,2 @@
+elasticsearch:
+  antiAffinity: "none"
